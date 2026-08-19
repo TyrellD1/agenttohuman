@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO="${A2H_REPO:-TyrellD1/agenttohuman}"
 INSTALL_DIR="${A2H_INSTALL_DIR:-$HOME/.local/bin}"
-API="https://api.github.com/repos/${REPO}/releases/latest"
+BASE="https://github.com/${REPO}/releases/latest/download"
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
@@ -42,18 +42,15 @@ tmp="$(mktemp -d)"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 
-echo "Fetching latest ${REPO} release..."
-release_json="$(curl -fsSL -A "a2h-install" "$API")"
-tag="$(printf '%s' "$release_json" | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)"
-if [ -z "$tag" ]; then
-  echo "No GitHub release found for ${REPO}. Publish a vX.Y.Z tag first." >&2
+echo "Downloading ${asset} from ${REPO} GitHub Releases..."
+if ! curl -fsSL -A "a2h-install" -o "$tmp/$asset" "${BASE}/${asset}"; then
+  echo "Download failed. Publish a release that includes ${asset}." >&2
   exit 1
 fi
-
-base="https://github.com/${REPO}/releases/download/${tag}"
-echo "Downloading ${asset} (${tag})..."
-curl -fsSL -A "a2h-install" -o "$tmp/$asset" "${base}/${asset}"
-curl -fsSL -A "a2h-install" -o "$tmp/SHA256SUMS" "${base}/SHA256SUMS"
+if ! curl -fsSL -A "a2h-install" -o "$tmp/SHA256SUMS" "${BASE}/SHA256SUMS"; then
+  echo "Download failed. Release is missing SHA256SUMS." >&2
+  exit 1
+fi
 
 expected="$(awk -v name="$asset" '$2 == name || $2 == "*"name { print $1; exit }' "$tmp/SHA256SUMS")"
 if [ -z "$expected" ]; then
@@ -74,7 +71,10 @@ fi
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp/$asset" "$INSTALL_DIR/a2h"
 
-echo "installed ${INSTALL_DIR}/a2h (${tag})"
+echo "installed ${INSTALL_DIR}/a2h"
+if [ -x "${INSTALL_DIR}/a2h" ]; then
+  echo "version: $("${INSTALL_DIR}/a2h" version)"
+fi
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
