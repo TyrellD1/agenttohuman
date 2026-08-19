@@ -4,28 +4,35 @@ CLI for **agent-to-human** notifications. An agent sends a message; a human
 gets it through a configured method. Methods are a horizontal, extendable
 layer. Discord webhook is implemented first.
 
-- Binary: `a2h`
+- Binary: `a2h` (Go)
 - Skill: `/a2h`
 - Local data: `~/.agenttohuman`
+- Prebuilt targets: macOS arm64, Linux amd64, Linux arm64
 
 ## Install
 
 ```bash
-git clone https://github.com/TyrellD1/agenttohuman.git
-cd agenttohuman
-npm install
-npm run build
-npm link
+curl -fsSL https://raw.githubusercontent.com/TyrellD1/agenttohuman/main/install.sh | bash
 ```
 
-Requires Node 18+.
+That downloads the latest GitHub Release into `~/.local/bin/a2h`. Override the
+directory with `A2H_INSTALL_DIR`.
+
+From source (needs Go 1.22+):
+
+```bash
+git clone https://github.com/TyrellD1/agenttohuman.git
+cd agenttohuman
+go install ./cmd/a2h
+```
 
 Copy the skill to your personal Cursor skills if you want `/a2h` in every
 project:
 
 ```bash
 mkdir -p ~/.cursor/skills/a2h
-cp .cursor/skills/a2h/SKILL.md ~/.cursor/skills/a2h/SKILL.md
+curl -fsSL https://raw.githubusercontent.com/TyrellD1/agenttohuman/main/.cursor/skills/a2h/SKILL.md \
+  -o ~/.cursor/skills/a2h/SKILL.md
 ```
 
 ## Quick start
@@ -57,6 +64,17 @@ a2h info --json
 a2h send --json "The long job finished."
 ```
 
+## Update
+
+```bash
+a2h update --check
+a2h update
+```
+
+`a2h update` replaces the current `a2h` binary with the latest GitHub Release
+after verifying `SHA256SUMS`. It only works for the prebuilt platforms above,
+and only if this process is an `a2h` binary (not a wrapper script).
+
 ## Commands
 
 | Command | Purpose |
@@ -67,6 +85,8 @@ a2h send --json "The long job finished."
 | `a2h info [method]` | Limits and payload shape |
 | `a2h default [method]` | Get or set the default method |
 | `a2h status` | Config path, default, configured methods |
+| `a2h update` | Install the latest GitHub Release over this binary |
+| `a2h version` | Print the version |
 
 Global flags: `--json`, `-h` / `--help`, `-V` / `--version`.
 
@@ -80,8 +100,8 @@ default unless `--method` is passed.
 
 ## Adding a method
 
-See `AGENTS.md`. Register a `MethodDefinition` in `src/methods/` and keep
-`a2h info` metadata accurate (character limits, payload shape).
+See `AGENTS.md`. Implement `Method` in `internal/methods/` and keep `a2h info`
+metadata accurate (character limits, payload shape).
 
 ## License
 

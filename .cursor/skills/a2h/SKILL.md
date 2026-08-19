@@ -15,8 +15,12 @@ discriminate.
 
 ## Workflow
 
-1. Confirm `a2h` is on `PATH`. If it is missing, tell the human to install
-   it from this repo (`npm install && npm run build && npm link`).
+1. Confirm `a2h` is on `PATH`. If it is missing, tell the human to install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TyrellD1/agenttohuman/main/install.sh | bash
+```
+
 2. Resolve the default method:
    `a2h default --json`
 3. Read that method's limits and payload shape:
