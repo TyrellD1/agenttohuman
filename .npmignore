@@ -1,0 +1,6 @@
+**/*.test.js
+**/*.test.d.ts
+**/*.test.js.map
+src
+tsconfig.json
+.github
