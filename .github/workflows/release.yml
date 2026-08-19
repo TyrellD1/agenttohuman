@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ldflags="-s -w -X github.com/TyrellD1/agenttohuman/internal/version.Version=${version} -X github.com/TyrellD1/agenttohuman/internal/version.Commit=${GITHUB_SHA}"
+          mkdir -p dist
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o dist/a2h-darwin-arm64 ./cmd/a2h
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o dist/a2h-linux-amd64 ./cmd/a2h
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o dist/a2h-linux-arm64 ./cmd/a2h
+          cd dist
+          sha256sum a2h-darwin-arm64 a2h-linux-amd64 a2h-linux-arm64 > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/a2h-darwin-arm64
+            dist/a2h-linux-amd64
+            dist/a2h-linux-arm64
+            dist/SHA256SUMS
+          generate_release_notes: true
