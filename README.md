@@ -54,6 +54,8 @@ a2h init discord-webhook --webhook-url "https://discord.com/api/webhooks/..."
 
 ```bash
 a2h send "The long job finished."
+# with files (repeatable, max 10, 20 MiB each; text optional with --file):
+a2h send "Build files" --file ./report.html --file ./shot.png
 ```
 
 Agents should prefer `--json` and the `/a2h` skill:
@@ -79,7 +81,7 @@ and only if this process is an `a2h` binary (not a wrapper script).
 
 | Command | Purpose |
 | --- | --- |
-| `a2h send <message>` | Send via the default method (`-m` to override) |
+| `a2h send <message> [--file <path> ...]` | Send via the default method (`-m` to override, `-f`/`--file` repeatable) |
 | `a2h init [method]` | Save credentials for a method |
 | `a2h methods` | List methods |
 | `a2h info [method]` | Limits and payload shape |

@@ -96,3 +96,24 @@ func TestUnknownCommand(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestSendFileFlagParses(t *testing.T) {
+	f, rest, err := parseArgs([]string{"send", "hi", "--file", "a.txt", "-f", "b.md", "--file=c.html"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Files) != 3 || f.Files[0] != "a.txt" || f.Files[2] != "c.html" {
+		t.Fatalf("files = %#v", f.Files)
+	}
+	if len(rest) == 0 || rest[0] != "send" {
+		t.Fatalf("rest = %#v", rest)
+	}
+}
+
+func TestSendRequiresTextOrFile(t *testing.T) {
+	t.Setenv("AGENTTOHUMAN_HOME", t.TempDir())
+	err := Run([]string{"send", "--json"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "no message given") {
+		t.Fatalf("err = %v", err)
+	}
+}

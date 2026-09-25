@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -18,6 +22,11 @@ import (
 )
 
 const DiscordWebhookID = "discord-webhook"
+
+const (
+	DiscordMaxFiles     = 10
+	DiscordMaxFileBytes = int64(20 << 20) // 20 MiB per file (Discord default)
+)
 
 var webhookURLRe = regexp.MustCompile(`(?i)^https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/\d+/[\w-]+$`)
 
@@ -37,16 +46,20 @@ func (DiscordWebhook) Metadata() Metadata {
 	return Metadata{
 		ContentCharacterLimit:  IntPtr(2000),
 		UsernameCharacterLimit: IntPtr(80),
+		MaxFiles:               IntPtr(DiscordMaxFiles),
+		MaxFileBytes:           Int64Ptr(DiscordMaxFileBytes),
 		RateLimit:              "5 requests per 2 seconds per webhook",
 		DocsURL:                "https://discord.com/developers/docs/resources/webhook#execute-webhook",
 		Notes: []string{
-			"content is required for a2h send (plain text / Discord markdown).",
+			"content is required unless --file is given (plain text / Discord markdown).",
 			"Discord may silently truncate content over 2000 characters; a2h rejects it first.",
 			"username overrides the webhook's default display name for that message.",
+			"files: any type uploads as an attachment (images render inline, .md/.html download). Max 10 files, 20 MiB each.",
 		},
 		PayloadShape: map[string]string{
-			"content":    "string, required, max 2000 characters",
+			"content":    "string, required unless files given, max 2000 characters",
 			"username":   "string, optional, max 80 characters",
+			"files":      "repeatable --file <path>, max 10 files, 20 MiB each",
 			"avatar_url": "string URL, optional (not exposed by a2h send yet)",
 			"embeds":     "array, optional, max 10 (not exposed by a2h send yet)",
 		},
@@ -94,8 +107,20 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 	if err := AssertWebhookURL(webhookURL); err != nil {
 		return SendResult{}, err
 	}
-	if err := AssertContent(req.Text); err != nil {
+	if err := AssertFiles(req.Files); err != nil {
 		return SendResult{}, err
+	}
+	text := strings.TrimSpace(req.Text)
+	if len(req.Files) == 0 {
+		if err := AssertContent(text); err != nil {
+			return SendResult{}, err
+		}
+	} else if text != "" {
+		if err := AssertContent(text); err != nil {
+			return SendResult{}, err
+		}
+	} else {
+		text = ""
 	}
 	username := strings.TrimSpace(req.Username)
 	if username == "" {
@@ -107,15 +132,6 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 		}
 	}
 
-	payload := map[string]string{"content": req.Text}
-	if username != "" {
-		payload["username"] = username
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return SendResult{}, err
-	}
-
 	parsed, err := url.Parse(webhookURL)
 	if err != nil {
 		return SendResult{}, err
@@ -124,11 +140,33 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 	query.Set("wait", "true")
 	parsed.RawQuery = query.Encode()
 
-	httpReq, err := http.NewRequest(http.MethodPost, parsed.String(), bytes.NewReader(body))
+	var body io.Reader
+	var contentType string
+	if len(req.Files) == 0 {
+		payload := map[string]string{"content": text}
+		if username != "" {
+			payload["username"] = username
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return SendResult{}, err
+		}
+		body = bytes.NewReader(raw)
+		contentType = "application/json"
+	} else {
+		buf, ctype, err := buildMultipartBody(text, username, req.Files)
+		if err != nil {
+			return SendResult{}, err
+		}
+		body = buf
+		contentType = ctype
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, parsed.String(), body)
 	if err != nil {
 		return SendResult{}, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", contentType)
 
 	res, err := discordDo(httpReq)
 	if err != nil {
@@ -157,6 +195,87 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 	}
 	_ = json.Unmarshal(raw, &msg)
 	return SendResult{Method: DiscordWebhookID, ID: msg.ID}, nil
+}
+
+func AssertFiles(paths []string) error {
+	if len(paths) > DiscordMaxFiles {
+		return fmt.Errorf("got %d files; Discord webhooks accept max %d per message", len(paths), DiscordMaxFiles)
+	}
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return fmt.Errorf("file %q: %v", p, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("file %q is a directory; pass a file path", p)
+		}
+		if info.Size() > DiscordMaxFileBytes {
+			return fmt.Errorf("file %q is %.1f MiB; max is 20 MiB per file", p, float64(info.Size())/(1<<20))
+		}
+	}
+	return nil
+}
+
+func buildMultipartBody(text, username string, paths []string) (*bytes.Buffer, string, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	payload := map[string]any{}
+	if strings.TrimSpace(text) != "" {
+		payload["content"] = text
+	}
+	if username != "" {
+		payload["username"] = username
+	}
+	attachments := make([]map[string]any, 0, len(paths))
+	for i, p := range paths {
+		attachments = append(attachments, map[string]any{"id": i, "filename": filepath.Base(p)})
+	}
+	if len(attachments) > 0 {
+		payload["attachments"] = attachments
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", err
+	}
+	part, err := w.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": []string{`form-data; name="payload_json"`},
+		"Content-Type":        []string{"application/json"},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := part.Write(raw); err != nil {
+		return nil, "", err
+	}
+
+	for i, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, "", fmt.Errorf("file %q: %v", p, err)
+		}
+		ctype := mime.TypeByExtension(strings.ToLower(filepath.Ext(p)))
+		if ctype == "" {
+			ctype = http.DetectContentType(data)
+			if ctype == "" {
+				ctype = "application/octet-stream"
+			}
+		}
+		fw, err := w.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": []string{fmt.Sprintf(`form-data; name="files[%d]"; filename="%s"`, i, filepath.Base(p))},
+			"Content-Type":        []string{ctype},
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := fw.Write(data); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
+	return &buf, w.FormDataContentType(), nil
 }
 
 func AssertWebhookURL(raw string) error {

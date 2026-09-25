@@ -10,6 +10,8 @@ import (
 type Metadata struct {
 	ContentCharacterLimit  *int              `json:"contentCharacterLimit"`
 	UsernameCharacterLimit *int              `json:"usernameCharacterLimit,omitempty"`
+	MaxFiles               *int              `json:"maxFiles,omitempty"`
+	MaxFileBytes           *int64            `json:"maxFileBytes,omitempty"`
 	RateLimit              string            `json:"rateLimit,omitempty"`
 	DocsURL                string            `json:"docsUrl"`
 	Notes                  []string          `json:"notes"`
@@ -19,6 +21,7 @@ type Metadata struct {
 type SendRequest struct {
 	Text     string
 	Username string
+	Files    []string
 }
 
 type SendResult struct {
@@ -111,5 +114,9 @@ func Describe(method Method, cfg config.AppConfig) Info {
 }
 
 func IntPtr(n int) *int {
+	return &n
+}
+
+func Int64Ptr(n int64) *int64 {
 	return &n
 }

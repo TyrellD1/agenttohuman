@@ -16,7 +16,7 @@ import (
 const help = `a2h — agent-to-human notifications
 
 Usage:
-  a2h send <message>          Send via the default method
+  a2h send <message> [--file <path> ...]   Send via the default method (text optional when --file is given)
   a2h init [method]           Save credentials for a method
   a2h methods                 List available methods
   a2h info [method]           Method metadata and payload shape
@@ -27,6 +27,7 @@ Usage:
 
 Options:
   -m, --method <id>           Method for send / info / init
+  -f, --file <path>           Attach a file (repeatable, max 10, 20 MiB each)
   --webhook-url <url>         Discord webhook URL (init)
   --username <name>           Webhook username override
   --stdin                     Read send message from stdin
@@ -49,6 +50,7 @@ type flags struct {
 	Check      bool
 	Username   string
 	WebhookURL string
+	Files      []string
 }
 
 type context struct {
@@ -171,6 +173,15 @@ func parseArgs(args []string) (flags, []string, error) {
 			i = next
 		case strings.HasPrefix(arg, "--webhook-url="):
 			f.WebhookURL = strings.TrimPrefix(arg, "--webhook-url=")
+		case arg == "-f" || arg == "--file":
+			value, next, err := needValue(args, i, arg)
+			if err != nil {
+				return f, nil, err
+			}
+			f.Files = append(f.Files, value)
+			i = next
+		case strings.HasPrefix(arg, "--file="):
+			f.Files = append(f.Files, strings.TrimPrefix(arg, "--file="))
 		case strings.HasPrefix(arg, "-"):
 			return f, nil, fmt.Errorf("unknown flag %s", arg)
 		default:
@@ -207,14 +218,18 @@ func handleSend(ctx context) error {
 		if err != nil {
 			return err
 		}
-		text = strings.TrimSpace(string(raw))
+		// --stdin text may be combined with rest args and files; join them.
+		stdinText := strings.TrimSpace(string(raw))
+		argText := strings.TrimSpace(strings.Join(ctx.rest, " "))
+		text = strings.TrimSpace(strings.TrimSpace(stdinText + "\n" + argText))
 	} else {
 		text = strings.TrimSpace(strings.Join(ctx.rest, " "))
 	}
-	if text == "" {
-		return fmt.Errorf("no message given. Usage: a2h send <message>  (or --stdin)")
+	files := ctx.flags.Files
+	if text == "" && len(files) == 0 {
+		return fmt.Errorf("no message given. Usage: a2h send <message> [--file <path> ...]  (or --stdin, or --file)")
 	}
-	result, err := notify(text, ctx.flags.Method, ctx.flags.Username)
+	result, err := notify(text, ctx.flags.Method, ctx.flags.Username, files)
 	if err != nil {
 		return err
 	}
@@ -222,10 +237,14 @@ func handleSend(ctx context) error {
 	if result.ID != "" {
 		human = fmt.Sprintf("sent (%s %s)", result.Method, result.ID)
 	}
+	if len(files) > 0 {
+		human = fmt.Sprintf("%s [%d file(s)]", human, len(files))
+	}
 	return emit(ctx, human, map[string]any{
 		"ok":     true,
 		"method": result.Method,
 		"id":     result.ID,
+		"files":  files,
 	})
 }
 
@@ -332,13 +351,13 @@ func handleInfo(ctx context) error {
 		lines = append(lines, "rate limit: "+info.Metadata.RateLimit)
 	}
 	lines = append(lines, "docs: "+info.Metadata.DocsURL, "payload:")
-	for _, key := range []string{"content", "username", "avatar_url", "embeds"} {
+	for _, key := range []string{"content", "username", "files", "avatar_url", "embeds"} {
 		if value, ok := info.Metadata.PayloadShape[key]; ok {
 			lines = append(lines, fmt.Sprintf("  %s: %s", key, value))
 		}
 	}
 	for k, v := range info.Metadata.PayloadShape {
-		if k == "content" || k == "username" || k == "avatar_url" || k == "embeds" {
+		if k == "content" || k == "username" || k == "files" || k == "avatar_url" || k == "embeds" {
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("  %s: %s", k, v))
@@ -475,7 +494,7 @@ func handleUpdate(ctx context) error {
 	return emit(ctx, fmt.Sprintf("updated %s -> %s", current, latest.Version), payload)
 }
 
-func notify(text, methodID, username string) (methods.SendResult, error) {
+func notify(text, methodID, username string, files []string) (methods.SendResult, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return methods.SendResult{}, err
@@ -488,7 +507,7 @@ func notify(text, methodID, username string) (methods.SendResult, error) {
 	if !method.Configured(settings) {
 		return methods.SendResult{}, fmt.Errorf("%s is not configured. Run: a2h init %s", method.Name(), method.ID())
 	}
-	return method.Send(settings, methods.SendRequest{Text: text, Username: username})
+	return method.Send(settings, methods.SendRequest{Text: text, Username: username, Files: files})
 }
 
 func isTTY(r io.Reader) bool {
