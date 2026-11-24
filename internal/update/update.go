@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -158,11 +159,44 @@ func VerifySHA256(data []byte, expected string) error {
 	return nil
 }
 
+// NeedsUpdate reports whether latest is newer than current. It never
+// offers a downgrade, which matters right after a release, when GitHub can
+// briefly still point /releases/latest at the previous tag. Dev builds and
+// unparseable versions always update.
 func NeedsUpdate(current, latest string) bool {
-	if current == "" || current == "dev" {
+	cur, curPre, ok := parseVersion(current)
+	if !ok {
 		return true
 	}
-	return current != latest
+	lat, latPre, ok := parseVersion(latest)
+	if !ok {
+		return current != latest
+	}
+	for i := range cur {
+		if lat[i] != cur[i] {
+			return lat[i] > cur[i]
+		}
+	}
+	// Same x.y.z: a pre-release such as 0.3.0-dev updates to 0.3.0.
+	return curPre && !latPre
+}
+
+// parseVersion reads "x.y.z" or "x.y.z-suffix" (leading "v" allowed).
+func parseVersion(v string) (nums [3]int, pre bool, ok bool) {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	core, suffix, hasSuffix := strings.Cut(v, "-")
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return nums, false, false
+	}
+	for i, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return nums, false, false
+		}
+		nums[i] = n
+	}
+	return nums, hasSuffix && suffix != "", true
 }
 
 func ReplaceExecutable(dest string, data []byte) error {

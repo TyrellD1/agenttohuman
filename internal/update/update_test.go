@@ -11,14 +11,27 @@ import (
 )
 
 func TestNeedsUpdate(t *testing.T) {
-	if !NeedsUpdate("dev", "0.2.0") {
-		t.Fatal("dev should update")
+	cases := []struct {
+		current, latest string
+		want            bool
+	}{
+		{"dev", "0.2.0", true},
+		{"", "0.2.0", true},
+		{"0.2.0", "0.2.0", false},
+		{"0.1.0", "0.2.0", true},
+		{"0.3.0", "0.3.1", true},
+		{"0.3.1", "0.3.0", false}, // stale "latest" must not downgrade
+		{"0.9.0", "0.10.0", true},
+		{"0.10.0", "0.9.0", false},
+		{"0.3.0-dev", "0.3.0", true},
+		{"0.3.0", "0.3.0-rc1", false},
+		{"1.0.0", "garbage", true},
+		{"1.0.0", "1.0.0", false},
 	}
-	if NeedsUpdate("0.2.0", "0.2.0") {
-		t.Fatal("same version should not update")
-	}
-	if !NeedsUpdate("0.1.0", "0.2.0") {
-		t.Fatal("older should update")
+	for _, c := range cases {
+		if got := NeedsUpdate(c.current, c.latest); got != c.want {
+			t.Errorf("NeedsUpdate(%q, %q) = %v, want %v", c.current, c.latest, got, c.want)
+		}
 	}
 }
 
