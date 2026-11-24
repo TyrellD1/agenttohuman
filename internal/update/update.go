@@ -3,10 +3,10 @@ package update
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,9 +18,12 @@ import (
 
 const (
 	Repo           = "TyrellD1/agenttohuman"
-	DefaultAPIBase = "https://api.github.com"
+	DefaultWebBase = "https://github.com"
 	ChecksumsName  = "SHA256SUMS"
 )
+
+// Targets are the prebuilt GOOS/GOARCH pairs each release publishes.
+var Targets = [][2]string{{"darwin", "arm64"}, {"linux", "amd64"}, {"linux", "arm64"}}
 
 var httpClient = &http.Client{Timeout: 60 * time.Second}
 
@@ -32,14 +35,14 @@ type Release struct {
 
 type Client struct {
 	HTTP    *http.Client
-	APIBase string
+	WebBase string
 	Repo    string
 }
 
 func NewClient() *Client {
 	return &Client{
 		HTTP:    httpClient,
-		APIBase: DefaultAPIBase,
+		WebBase: DefaultWebBase,
 		Repo:    Repo,
 	}
 }
@@ -53,55 +56,56 @@ func CurrentAsset() string {
 }
 
 func Supported() bool {
-	switch runtime.GOOS + "/" + runtime.GOARCH {
-	case "darwin/arm64", "linux/amd64", "linux/arm64":
-		return true
-	default:
-		return false
+	for _, target := range Targets {
+		if target[0] == runtime.GOOS && target[1] == runtime.GOARCH {
+			return true
+		}
 	}
+	return false
 }
 
+// Latest resolves the newest release from the github.com redirect
+// (/releases/latest -> /releases/tag/<tag>) instead of the REST API, so it is
+// not subject to the API's 60 requests/hour limit for anonymous callers.
+// install.sh downloads the same way.
 func (c *Client) Latest() (Release, error) {
-	httpClient := c.http()
-	url := strings.TrimRight(c.apiBase(), "/") + "/repos/" + c.repo() + "/releases/latest"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	base := strings.TrimRight(c.webBase(), "/") + "/" + c.repo()
+	req, err := http.NewRequest(http.MethodGet, base+"/releases/latest", nil)
 	if err != nil {
 		return Release{}, err
 	}
 	req.Header.Set("User-Agent", "a2h/"+version.String())
-	req.Header.Set("Accept", "application/vnd.github+json")
-	res, err := httpClient.Do(req)
+	noFollow := *c.http()
+	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	res, err := noFollow.Do(req)
 	if err != nil {
 		return Release{}, err
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(res.Body)
+	_, _ = io.Copy(io.Discard, res.Body)
+	if res.StatusCode < 300 || res.StatusCode >= 400 {
+		return Release{}, fmt.Errorf("GitHub latest release lookup failed (%d)", res.StatusCode)
+	}
+	loc, err := res.Location()
 	if err != nil {
-		return Release{}, err
+		return Release{}, fmt.Errorf("GitHub latest release lookup: %v", err)
 	}
-	if res.StatusCode != http.StatusOK {
-		return Release{}, fmt.Errorf("GitHub releases failed (%d)", res.StatusCode)
+	_, tag, found := strings.Cut(loc.Path, "/releases/tag/")
+	tag = strings.Trim(tag, "/")
+	if !found || tag == "" || strings.Contains(tag, "/") {
+		return Release{}, fmt.Errorf("no GitHub release found for %s", c.repo())
 	}
-	var parsed struct {
-		TagName string `json:"tag_name"`
-		Assets  []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-		} `json:"assets"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return Release{}, err
-	}
-	if parsed.TagName == "" {
-		return Release{}, fmt.Errorf("latest GitHub release has no tag")
-	}
-	assets := map[string]string{}
-	for _, asset := range parsed.Assets {
-		assets[asset.Name] = asset.URL
+	download := base + "/releases/download/" + url.PathEscape(tag) + "/"
+	assets := map[string]string{ChecksumsName: download + ChecksumsName}
+	for _, target := range Targets {
+		name := AssetName(target[0], target[1])
+		assets[name] = download + name
 	}
 	return Release{
-		Tag:     parsed.TagName,
-		Version: strings.TrimPrefix(parsed.TagName, "v"),
+		Tag:     tag,
+		Version: strings.TrimPrefix(tag, "v"),
 		Assets:  assets,
 	}, nil
 }
@@ -206,11 +210,11 @@ func (c *Client) http() *http.Client {
 	return httpClient
 }
 
-func (c *Client) apiBase() string {
-	if c != nil && c.APIBase != "" {
-		return c.APIBase
+func (c *Client) webBase() string {
+	if c != nil && c.WebBase != "" {
+		return c.WebBase
 	}
-	return DefaultAPIBase
+	return DefaultWebBase
 }
 
 func (c *Client) repo() string {
