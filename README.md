@@ -54,8 +54,20 @@ a2h init discord-webhook --webhook-url "https://discord.com/api/webhooks/..."
 
 ```bash
 a2h send "The long job finished."
-# with files (repeatable, max 10, 20 MiB each; text optional with --file):
-a2h send "Build files" --file ./report.html --file ./shot.png
+# with images shown inline (png, jpeg, gif, webp, avif; repeatable):
+a2h send "New dashboard vs old" --image ./after.png --image ./before.png
+# with any other files (downloads in Discord):
+a2h send "Build files" --file ./report.html --file ./notes.md
+```
+
+Images and files share one limit: 10 per message, 20 MiB each. Text is
+optional when you attach something. Several images show as a gallery under
+the message. `--image` rejects formats Discord would only offer as a download
+(HEIC, BMP, TIFF, SVG); convert them first, or send them with `--file`.
+
+```bash
+# convert an iPhone photo on macOS
+sips -s format png IMG_0001.HEIC --out IMG_0001.png
 ```
 
 Agents should prefer `--json` and the `/a2h` skill:
@@ -81,7 +93,7 @@ and only if this process is an `a2h` binary (not a wrapper script).
 
 | Command | Purpose |
 | --- | --- |
-| `a2h send <message> [--file <path> ...]` | Send via the default method (`-m` to override, `-f`/`--file` repeatable) |
+| `a2h send <message> [--image <path> ...] [--file <path> ...]` | Send via the default method (`-m` to override; `-i`/`--image` and `-f`/`--file` repeatable) |
 | `a2h init [method]` | Save credentials for a method |
 | `a2h methods` | List methods |
 | `a2h info [method]` | Limits and payload shape |

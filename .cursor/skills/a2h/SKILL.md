@@ -29,9 +29,15 @@ curl -fsSL https://raw.githubusercontent.com/TyrellD1/agenttohuman/main/install.
 4. Send when the requested event happens (task done, blocked, needs a
    decision). Do not send a preview, and do not send internal chain-of-thought.
    `a2h send --json "<message>"`
-   Attach files with repeatable `-f` / `--file` (max 10, 20 MiB each):
-   `a2h send --json "<message>" --file ./report.html --file ./shot.png`
-   Text is optional when files are given: `a2h send --json --file ./out.html`
+   Show images inline with repeatable `-i` / `--image` (png, jpeg, gif,
+   webp, avif). Several images render as a gallery:
+   `a2h send --json "<message>" --image ./after.png --image ./before.png`
+   Attach other files with repeatable `-f` / `--file` (they download):
+   `a2h send --json "<message>" --file ./report.html`
+   Images and files share one limit: max 10 per message, 20 MiB each. Text
+   is optional when you attach something: `a2h send --json --image ./shot.png`
+   If `--image` rejects a format (HEIC, BMP, TIFF, SVG), convert it to PNG
+   first (macOS: `sips -s format png in.heic --out out.png`).
 5. If send fails because the message is over the content limit, split into
    multiple `a2h send` calls at or under that limit.
 
