@@ -1,9 +1,17 @@
 package methods
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -186,5 +194,216 @@ func TestSendFileOnlyAllowsEmptyText(t *testing.T) {
 		SendRequest{},
 	); err == nil {
 		t.Fatal("expected empty message+files error")
+	}
+}
+
+func writePNG(t *testing.T, path string) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 4, 3))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeJPEG(t *testing.T, path string) {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 4, 3)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// parts reads a multipart request body into name -> (filename, content type).
+func parts(t *testing.T, req *http.Request) (map[string][2]string, string) {
+	t.Helper()
+	_, params, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := multipart.NewReader(req.Body, params["boundary"])
+	out := map[string][2]string{}
+	var payload string
+	for {
+		p, err := r.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(p)
+		if p.FormName() == "payload_json" {
+			payload = string(raw)
+			continue
+		}
+		out[p.FormName()] = [2]string{p.FileName(), p.Header.Get("Content-Type")}
+	}
+	return out, payload
+}
+
+func TestSendImagesInlineBeforeFiles(t *testing.T) {
+	dir := t.TempDir()
+	shot := filepath.Join(dir, "shot") // no extension: a2h adds .png
+	photo := filepath.Join(dir, "photo.jpeg")
+	notes := filepath.Join(dir, "notes.md")
+	writePNG(t, shot)
+	writeJPEG(t, photo)
+	if err := os.WriteFile(notes, []byte("# hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string][2]string
+	var payload string
+	original := discordDo
+	t.Cleanup(func() { discordDo = original })
+	discordDo = func(req *http.Request) (*http.Response, error) {
+		got, payload = parts(t, req)
+		return &http.Response{
+			StatusCode: 200,
+			Body: io.NopCloser(strings.NewReader(`{"id":"msg_img","attachments":[
+				{"filename":"shot.png","content_type":"image/png","size":70,"width":4,"height":3},
+				{"filename":"photo.jpeg","content_type":"image/jpeg","size":600,"width":4,"height":3},
+				{"filename":"notes.md","content_type":"text/markdown","size":4}]}`)),
+			Header: make(http.Header),
+		}, nil
+	}
+	result, err := DiscordWebhook{}.Send(
+		map[string]any{"webhookUrl": "https://discord.com/api/webhooks/1/token"},
+		SendRequest{Text: "screens", Files: []string{notes}, Images: []string{shot, photo}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]string{
+		"files[0]": {"shot.png", "image/png"},
+		"files[1]": {"photo.jpeg", "image/jpeg"},
+	}
+	// .md's type comes from the OS mime table (text/markdown or text/plain).
+	if f := got["files[2]"]; f[0] != "notes.md" || !strings.HasPrefix(f[1], "text/") {
+		t.Fatalf("files[2] = %v", f)
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Fatalf("%s = %v, want %v (all %v)", name, got[name], w, got)
+		}
+	}
+	if !strings.Contains(payload, `"filename":"shot.png"`) || !strings.Contains(payload, `"content":"screens"`) {
+		t.Fatalf("payload_json = %s", payload)
+	}
+	if len(result.Attachments) != 3 || result.Attachments[0].Width != 4 || result.Attachments[2].Width != 0 {
+		t.Fatalf("attachments = %#v", result.Attachments)
+	}
+}
+
+func TestImageOnlyNeedsNoText(t *testing.T) {
+	dir := t.TempDir()
+	shot := filepath.Join(dir, "a.png")
+	writePNG(t, shot)
+	original := discordDo
+	t.Cleanup(func() { discordDo = original })
+	discordDo = func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"m"}`)), Header: make(http.Header)}, nil
+	}
+	if _, err := (DiscordWebhook{}).Send(
+		map[string]any{"webhookUrl": "https://discord.com/api/webhooks/1/token"},
+		SendRequest{Images: []string{shot}},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAssertImagesRejectsNonInlineFormats(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string][]byte{
+		"pic.bmp":  append([]byte("BM"), make([]byte, 64)...),
+		"pic.heic": append([]byte("\x00\x00\x00\x1cftypheic"), make([]byte, 32)...),
+		"pic.png":  []byte("not really a png"),
+	}
+	for name, data := range cases {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := AssertImages([]string{p})
+		if err == nil || !strings.Contains(err.Error(), "not a format Discord shows inline") {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+		// The same file is fine as a plain attachment.
+		if err := AssertFiles([]string{p}); err != nil {
+			t.Fatalf("%s as file: %v", name, err)
+		}
+	}
+}
+
+func TestSniffImageTypeAVIF(t *testing.T) {
+	head := append([]byte("\x00\x00\x00\x1cftypavif"), make([]byte, 32)...)
+	if got := sniffImageType(head); got != "image/avif" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+func TestImageFilename(t *testing.T) {
+	cases := []struct {
+		path string
+		exts []string
+		want string
+	}{
+		{"/x/shot.png", []string{".png"}, "shot.png"},
+		{"/x/SHOT.PNG", []string{".png"}, "SHOT.PNG"},
+		{"/x/shot", []string{".png"}, "shot.png"},
+		{"/x/photo.jpg", []string{".jpg", ".jpeg"}, "photo.jpg"},
+		{"/x/photo.png", []string{".jpg", ".jpeg"}, "photo.png.jpg"},
+	}
+	for _, c := range cases {
+		if got := imageFilename(c.path, c.exts); got != c.want {
+			t.Fatalf("%s: got %s, want %s", c.path, got, c.want)
+		}
+	}
+}
+
+func TestImagesAndFilesShareLimit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.png")
+	writePNG(t, p)
+	images := make([]string, 6)
+	files := make([]string, 5)
+	for i := range images {
+		images[i] = p
+	}
+	for i := range files {
+		files[i] = p
+	}
+	if _, err := prepareUploads(images, files); err == nil || !strings.Contains(err.Error(), "max 10") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := prepareUploads(images, files[:4]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMultipartEscapesFilename(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, `odd "name".png`)
+	writePNG(t, p)
+	uploads, err := prepareUploads([]string{p}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, ctype, err := buildMultipartBody("", "", uploads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://x", buf)
+	req.Header.Set("Content-Type", ctype)
+	got, _ := parts(t, req)
+	if got["files[0]"][0] != `odd "name".png` {
+		t.Fatalf("filename = %q", got["files[0]"][0])
 	}
 }

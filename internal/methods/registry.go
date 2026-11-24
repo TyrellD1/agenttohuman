@@ -12,6 +12,7 @@ type Metadata struct {
 	UsernameCharacterLimit *int              `json:"usernameCharacterLimit,omitempty"`
 	MaxFiles               *int              `json:"maxFiles,omitempty"`
 	MaxFileBytes           *int64            `json:"maxFileBytes,omitempty"`
+	ImageFormats           []string          `json:"imageFormats,omitempty"`
 	RateLimit              string            `json:"rateLimit,omitempty"`
 	DocsURL                string            `json:"docsUrl"`
 	Notes                  []string          `json:"notes"`
@@ -22,11 +23,24 @@ type SendRequest struct {
 	Text     string
 	Username string
 	Files    []string
+	// Images are local image paths shown inline with the message.
+	Images []string
 }
 
 type SendResult struct {
-	Method string `json:"method"`
-	ID     string `json:"id,omitempty"`
+	Method      string       `json:"method"`
+	ID          string       `json:"id,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// Attachment is what the provider reports back for an uploaded file.
+// Width and height are set when the provider processed it as an image.
+type Attachment struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
 }
 
 type InitRequest struct {

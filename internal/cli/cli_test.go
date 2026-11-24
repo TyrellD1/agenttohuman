@@ -117,3 +117,30 @@ func TestSendRequiresTextOrFile(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestSendImageFlagParses(t *testing.T) {
+	f, rest, err := parseArgs([]string{"send", "look", "-i", "a.png", "--image", "b.jpg", "--image=c.webp", "--file", "d.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Images) != 3 || f.Images[0] != "a.png" || f.Images[2] != "c.webp" {
+		t.Fatalf("images = %#v", f.Images)
+	}
+	if len(f.Files) != 1 || f.Files[0] != "d.md" {
+		t.Fatalf("files = %#v", f.Files)
+	}
+	if len(rest) != 2 || rest[1] != "look" {
+		t.Fatalf("rest = %#v", rest)
+	}
+}
+
+func TestSendImageMissingFileFailsBeforeNetwork(t *testing.T) {
+	t.Setenv("AGENTTOHUMAN_HOME", t.TempDir())
+	if err := Run([]string{"init", "discord-webhook", "--webhook-url", "https://discord.com/api/webhooks/42/token-value"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	err := Run([]string{"send", "hi", "--image", "does-not-exist.png"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), `image "does-not-exist.png"`) {
+		t.Fatalf("err = %v", err)
+	}
+}

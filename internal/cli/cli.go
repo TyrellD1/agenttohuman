@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/TyrellD1/agenttohuman/internal/config"
@@ -16,7 +17,8 @@ import (
 const help = `a2h — agent-to-human notifications
 
 Usage:
-  a2h send <message> [--file <path> ...]   Send via the default method (text optional when --file is given)
+  a2h send <message> [--image <path> ...] [--file <path> ...]
+                              Send via the default method (text optional with --image/--file)
   a2h init [method]           Save credentials for a method
   a2h methods                 List available methods
   a2h info [method]           Method metadata and payload shape
@@ -27,7 +29,8 @@ Usage:
 
 Options:
   -m, --method <id>           Method for send / info / init
-  -f, --file <path>           Attach a file (repeatable, max 10, 20 MiB each)
+  -i, --image <path>          Attach an image shown inline (png/jpeg/gif/webp/avif, repeatable)
+  -f, --file <path>           Attach any file (repeatable; images + files max 10, 20 MiB each)
   --webhook-url <url>         Discord webhook URL (init)
   --username <name>           Webhook username override
   --stdin                     Read send message from stdin
@@ -51,6 +54,7 @@ type flags struct {
 	Username   string
 	WebhookURL string
 	Files      []string
+	Images     []string
 }
 
 type context struct {
@@ -182,6 +186,15 @@ func parseArgs(args []string) (flags, []string, error) {
 			i = next
 		case strings.HasPrefix(arg, "--file="):
 			f.Files = append(f.Files, strings.TrimPrefix(arg, "--file="))
+		case arg == "-i" || arg == "--image":
+			value, next, err := needValue(args, i, arg)
+			if err != nil {
+				return f, nil, err
+			}
+			f.Images = append(f.Images, value)
+			i = next
+		case strings.HasPrefix(arg, "--image="):
+			f.Images = append(f.Images, strings.TrimPrefix(arg, "--image="))
 		case strings.HasPrefix(arg, "-"):
 			return f, nil, fmt.Errorf("unknown flag %s", arg)
 		default:
@@ -226,10 +239,11 @@ func handleSend(ctx context) error {
 		text = strings.TrimSpace(strings.Join(ctx.rest, " "))
 	}
 	files := ctx.flags.Files
-	if text == "" && len(files) == 0 {
-		return fmt.Errorf("no message given. Usage: a2h send <message> [--file <path> ...]  (or --stdin, or --file)")
+	images := ctx.flags.Images
+	if text == "" && len(files) == 0 && len(images) == 0 {
+		return fmt.Errorf("no message given. Usage: a2h send <message> [--image <path> ...] [--file <path> ...]  (or --stdin, or only --image/--file)")
 	}
-	result, err := notify(text, ctx.flags.Method, ctx.flags.Username, files)
+	result, err := notify(methods.SendRequest{Text: text, Username: ctx.flags.Username, Files: files, Images: images}, ctx.flags.Method)
 	if err != nil {
 		return err
 	}
@@ -237,14 +251,33 @@ func handleSend(ctx context) error {
 	if result.ID != "" {
 		human = fmt.Sprintf("sent (%s %s)", result.Method, result.ID)
 	}
+	var counts []string
+	if len(images) > 0 {
+		counts = append(counts, fmt.Sprintf("%d image(s)", len(images)))
+	}
 	if len(files) > 0 {
-		human = fmt.Sprintf("%s [%d file(s)]", human, len(files))
+		counts = append(counts, fmt.Sprintf("%d file(s)", len(files)))
+	}
+	if len(counts) > 0 {
+		human = fmt.Sprintf("%s [%s]", human, strings.Join(counts, ", "))
+	}
+	if images == nil {
+		images = []string{}
+	}
+	if files == nil {
+		files = []string{}
+	}
+	attachments := result.Attachments
+	if attachments == nil {
+		attachments = []methods.Attachment{}
 	}
 	return emit(ctx, human, map[string]any{
-		"ok":     true,
-		"method": result.Method,
-		"id":     result.ID,
-		"files":  files,
+		"ok":          true,
+		"method":      result.Method,
+		"id":          result.ID,
+		"images":      images,
+		"files":       files,
+		"attachments": attachments,
 	})
 }
 
@@ -351,13 +384,14 @@ func handleInfo(ctx context) error {
 		lines = append(lines, "rate limit: "+info.Metadata.RateLimit)
 	}
 	lines = append(lines, "docs: "+info.Metadata.DocsURL, "payload:")
-	for _, key := range []string{"content", "username", "files", "avatar_url", "embeds"} {
+	ordered := []string{"content", "username", "images", "files", "avatar_url", "embeds"}
+	for _, key := range ordered {
 		if value, ok := info.Metadata.PayloadShape[key]; ok {
 			lines = append(lines, fmt.Sprintf("  %s: %s", key, value))
 		}
 	}
 	for k, v := range info.Metadata.PayloadShape {
-		if k == "content" || k == "username" || k == "files" || k == "avatar_url" || k == "embeds" {
+		if slices.Contains(ordered, k) {
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("  %s: %s", k, v))
@@ -494,7 +528,7 @@ func handleUpdate(ctx context) error {
 	return emit(ctx, fmt.Sprintf("updated %s -> %s", current, latest.Version), payload)
 }
 
-func notify(text, methodID, username string, files []string) (methods.SendResult, error) {
+func notify(req methods.SendRequest, methodID string) (methods.SendResult, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return methods.SendResult{}, err
@@ -507,7 +541,7 @@ func notify(text, methodID, username string, files []string) (methods.SendResult
 	if !method.Configured(settings) {
 		return methods.SendResult{}, fmt.Errorf("%s is not configured. Run: a2h init %s", method.Name(), method.ID())
 	}
-	return method.Send(settings, methods.SendRequest{Text: text, Username: username, Files: files})
+	return method.Send(settings, req)
 }
 
 func isTTY(r io.Reader) bool {

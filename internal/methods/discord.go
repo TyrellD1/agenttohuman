@@ -48,18 +48,22 @@ func (DiscordWebhook) Metadata() Metadata {
 		UsernameCharacterLimit: IntPtr(80),
 		MaxFiles:               IntPtr(DiscordMaxFiles),
 		MaxFileBytes:           Int64Ptr(DiscordMaxFileBytes),
+		ImageFormats:           DiscordImageFormats,
 		RateLimit:              "5 requests per 2 seconds per webhook",
 		DocsURL:                "https://discord.com/developers/docs/resources/webhook#execute-webhook",
 		Notes: []string{
-			"content is required unless --file is given (plain text / Discord markdown).",
+			"content is required unless --image or --file is given (plain text / Discord markdown).",
 			"Discord may silently truncate content over 2000 characters; a2h rejects it first.",
 			"username overrides the webhook's default display name for that message.",
-			"files: any type uploads as an attachment (images render inline, .md/.html download). Max 10 files, 20 MiB each.",
+			"images: --image checks the content is png, jpeg, gif, webp or avif so it renders inline; several images show as a gallery under the text.",
+			"files: --file uploads any type as an attachment (.md/.html/.pdf download; heic/bmp/tiff/svg also download, not inline).",
+			"images and files share one limit: max 10 per message, 20 MiB each.",
 		},
 		PayloadShape: map[string]string{
-			"content":    "string, required unless files given, max 2000 characters",
+			"content":    "string, required unless images or files given, max 2000 characters",
 			"username":   "string, optional, max 80 characters",
-			"files":      "repeatable --file <path>, max 10 files, 20 MiB each",
+			"images":     "repeatable --image <path> (png, jpeg, gif, webp, avif), shown inline; counts toward the 10-attachment limit",
+			"files":      "repeatable --file <path>, any type; images + files max 10, 20 MiB each",
 			"avatar_url": "string URL, optional (not exposed by a2h send yet)",
 			"embeds":     "array, optional, max 10 (not exposed by a2h send yet)",
 		},
@@ -107,20 +111,15 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 	if err := AssertWebhookURL(webhookURL); err != nil {
 		return SendResult{}, err
 	}
-	if err := AssertFiles(req.Files); err != nil {
+	uploads, err := prepareUploads(req.Images, req.Files)
+	if err != nil {
 		return SendResult{}, err
 	}
 	text := strings.TrimSpace(req.Text)
-	if len(req.Files) == 0 {
+	if len(uploads) == 0 || text != "" {
 		if err := AssertContent(text); err != nil {
 			return SendResult{}, err
 		}
-	} else if text != "" {
-		if err := AssertContent(text); err != nil {
-			return SendResult{}, err
-		}
-	} else {
-		text = ""
 	}
 	username := strings.TrimSpace(req.Username)
 	if username == "" {
@@ -142,7 +141,7 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 
 	var body io.Reader
 	var contentType string
-	if len(req.Files) == 0 {
+	if len(uploads) == 0 {
 		payload := map[string]string{"content": text}
 		if username != "" {
 			payload["username"] = username
@@ -154,7 +153,7 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 		body = bytes.NewReader(raw)
 		contentType = "application/json"
 	} else {
-		buf, ctype, err := buildMultipartBody(text, username, req.Files)
+		buf, ctype, err := buildMultipartBody(text, username, uploads)
 		if err != nil {
 			return SendResult{}, err
 		}
@@ -191,32 +190,141 @@ func (DiscordWebhook) Send(settings config.MethodConfig, req SendRequest) (SendR
 	}
 
 	var msg struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		Attachments []struct {
+			Filename    string `json:"filename"`
+			ContentType string `json:"content_type"`
+			Size        int64  `json:"size"`
+			Width       int    `json:"width"`
+			Height      int    `json:"height"`
+		} `json:"attachments"`
 	}
 	_ = json.Unmarshal(raw, &msg)
-	return SendResult{Method: DiscordWebhookID, ID: msg.ID}, nil
+	result := SendResult{Method: DiscordWebhookID, ID: msg.ID}
+	for _, a := range msg.Attachments {
+		result.Attachments = append(result.Attachments, Attachment(a))
+	}
+	return result, nil
 }
 
+// discordInlineImageTypes are the formats Discord renders inline (it reports
+// width/height for them). HEIC, BMP, TIFF and SVG upload but only as downloads.
+var discordInlineImageTypes = map[string][]string{
+	"image/png":  {".png"},
+	"image/jpeg": {".jpg", ".jpeg"},
+	"image/gif":  {".gif"},
+	"image/webp": {".webp"},
+	"image/avif": {".avif"},
+}
+
+// DiscordImageFormats lists inline image formats for metadata and errors.
+var DiscordImageFormats = []string{"png", "jpeg", "gif", "webp", "avif"}
+
+type upload struct {
+	path        string
+	filename    string
+	contentType string
+}
+
+// AssertFiles validates generic attachments (any type).
 func AssertFiles(paths []string) error {
-	if len(paths) > DiscordMaxFiles {
-		return fmt.Errorf("got %d files; Discord webhooks accept max %d per message", len(paths), DiscordMaxFiles)
-	}
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			return fmt.Errorf("file %q: %v", p, err)
-		}
-		if info.IsDir() {
-			return fmt.Errorf("file %q is a directory; pass a file path", p)
-		}
-		if info.Size() > DiscordMaxFileBytes {
-			return fmt.Errorf("file %q is %.1f MiB; max is 20 MiB per file", p, float64(info.Size())/(1<<20))
-		}
-	}
-	return nil
+	_, err := prepareUploads(nil, paths)
+	return err
 }
 
-func buildMultipartBody(text, username string, paths []string) (*bytes.Buffer, string, error) {
+// AssertImages validates images (must be a format Discord renders inline).
+func AssertImages(paths []string) error {
+	_, err := prepareUploads(paths, nil)
+	return err
+}
+
+// prepareUploads validates images and files and resolves each upload's
+// filename and content type. Images come first so they lead the gallery.
+func prepareUploads(images, files []string) ([]upload, error) {
+	if n := len(images) + len(files); n > DiscordMaxFiles {
+		return nil, fmt.Errorf("got %d attachments (images + files); Discord webhooks accept max %d per message", n, DiscordMaxFiles)
+	}
+	uploads := make([]upload, 0, len(images)+len(files))
+	for _, p := range images {
+		head, err := statAndHead(p, "image")
+		if err != nil {
+			return nil, err
+		}
+		ctype := sniffImageType(head)
+		exts, ok := discordInlineImageTypes[ctype]
+		if !ok {
+			return nil, fmt.Errorf("image %q is not a format Discord shows inline (%s). Convert it, e.g. sips -s format png %q --out out.png, or attach it with --file", p, strings.Join(DiscordImageFormats, ", "), p)
+		}
+		uploads = append(uploads, upload{path: p, filename: imageFilename(p, exts), contentType: ctype})
+	}
+	for _, p := range files {
+		head, err := statAndHead(p, "file")
+		if err != nil {
+			return nil, err
+		}
+		ctype := mime.TypeByExtension(strings.ToLower(filepath.Ext(p)))
+		if ctype == "" {
+			ctype = http.DetectContentType(head)
+		}
+		uploads = append(uploads, upload{path: p, filename: filepath.Base(p), contentType: ctype})
+	}
+	return uploads, nil
+}
+
+// statAndHead checks that p is a regular file under the size limit and
+// returns up to its first 512 bytes for sniffing.
+func statAndHead(p, kind string) ([]byte, error) {
+	info, err := os.Stat(p)
+	if err != nil {
+		return nil, fmt.Errorf("%s %q: %v", kind, p, err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%s %q is a directory; pass a file path", kind, p)
+	}
+	if info.Size() > DiscordMaxFileBytes {
+		return nil, fmt.Errorf("%s %q is %.1f MiB; max is %d MiB per file", kind, p, float64(info.Size())/(1<<20), DiscordMaxFileBytes>>20)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, fmt.Errorf("%s %q: %v", kind, p, err)
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, fmt.Errorf("%s %q: %v", kind, p, err)
+	}
+	return head[:n], nil
+}
+
+// sniffImageType detects the image format from content, not the extension.
+func sniffImageType(head []byte) string {
+	// ISO-BMFF: size(4) "ftyp" brand(4). net/http does not sniff AVIF.
+	if len(head) >= 12 && string(head[4:8]) == "ftyp" {
+		switch string(head[8:12]) {
+		case "avif", "avis":
+			return "image/avif"
+		}
+	}
+	return http.DetectContentType(head)
+}
+
+// imageFilename keeps the name when its extension matches the content, and
+// otherwise appends the right one so Discord renders it inline.
+func imageFilename(p string, exts []string) string {
+	base := filepath.Base(p)
+	ext := strings.ToLower(filepath.Ext(base))
+	for _, want := range exts {
+		if ext == want {
+			return base
+		}
+	}
+	return base + exts[0]
+}
+
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"", "\r", "", "\n", "")
+
+func buildMultipartBody(text, username string, uploads []upload) (*bytes.Buffer, string, error) {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 
@@ -227,9 +335,9 @@ func buildMultipartBody(text, username string, paths []string) (*bytes.Buffer, s
 	if username != "" {
 		payload["username"] = username
 	}
-	attachments := make([]map[string]any, 0, len(paths))
-	for i, p := range paths {
-		attachments = append(attachments, map[string]any{"id": i, "filename": filepath.Base(p)})
+	attachments := make([]map[string]any, 0, len(uploads))
+	for i, u := range uploads {
+		attachments = append(attachments, map[string]any{"id": i, "filename": u.filename})
 	}
 	if len(attachments) > 0 {
 		payload["attachments"] = attachments
@@ -249,20 +357,17 @@ func buildMultipartBody(text, username string, paths []string) (*bytes.Buffer, s
 		return nil, "", err
 	}
 
-	for i, p := range paths {
-		data, err := os.ReadFile(p)
+	for i, u := range uploads {
+		data, err := os.ReadFile(u.path)
 		if err != nil {
-			return nil, "", fmt.Errorf("file %q: %v", p, err)
+			return nil, "", fmt.Errorf("file %q: %v", u.path, err)
 		}
-		ctype := mime.TypeByExtension(strings.ToLower(filepath.Ext(p)))
+		ctype := u.contentType
 		if ctype == "" {
-			ctype = http.DetectContentType(data)
-			if ctype == "" {
-				ctype = "application/octet-stream"
-			}
+			ctype = "application/octet-stream"
 		}
 		fw, err := w.CreatePart(textproto.MIMEHeader{
-			"Content-Disposition": []string{fmt.Sprintf(`form-data; name="files[%d]"; filename="%s"`, i, filepath.Base(p))},
+			"Content-Disposition": []string{fmt.Sprintf(`form-data; name="files[%d]"; filename="%s"`, i, quoteEscaper.Replace(u.filename))},
 			"Content-Type":        []string{ctype},
 		})
 		if err != nil {
